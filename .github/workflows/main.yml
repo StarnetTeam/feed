@@ -3,8 +3,9 @@ name: Collect satellite feeds
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions uses UTC. Change these four entries to your preferred UTC times.
-    - cron: '0 0,6,12,18 * * *'
+    # Six daily windows, UTC. The job sleeps a random 0-20 minutes after each trigger.
+    # Adjust these hours to match the user's match schedule.
+    - cron: '0 12,14,16,18,20,22 * * *'
 
 permissions:
   contents: write
@@ -12,7 +13,7 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,6 +28,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
+
+      - name: Random delay inside the current time window
+        run: |
+          delay_minutes=$((RANDOM % 21))
+          echo "Waiting ${delay_minutes} minutes before visiting a group"
+          sleep "$((delay_minutes * 60))"
 
       - name: Collect and parse posts
         run: python -m app.main
