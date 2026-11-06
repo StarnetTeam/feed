@@ -3,8 +3,7 @@ name: Collect satellite feeds
 on:
   workflow_dispatch:
   schedule:
-    # Six daily windows, UTC. The job sleeps a random 0-20 minutes after each trigger.
-    # Adjust these hours to match the user's match schedule.
+    # Six daily windows, UTC. Collection starts immediately at each window.
     - cron: '0 12,14,16,18,20,22 * * *'
 
 permissions:
@@ -29,13 +28,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
-
-      - name: Random delay inside the current time window
-        run: |
-          # Keep the initial wait short because sleep counts toward job timeout.
-          delay_minutes=$((RANDOM % 11))
-          echo "Waiting ${delay_minutes} minutes before visiting a group"
-          sleep "$((delay_minutes * 60))"
 
       - name: Collect and parse posts
         run: python -m app.main
