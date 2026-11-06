@@ -1,0 +1,14 @@
+{
+  "timezone": "UTC",
+  "windows": [
+    "12:00",
+    "14:00",
+    "16:00",
+    "18:00",
+    "20:00",
+    "22:00"
+  ],
+  "random_delay_minutes": 20,
+  "delay_between_groups_seconds": [45, 90],
+  "max_articles_per_group": 8
+}
