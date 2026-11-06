@@ -13,7 +13,8 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Includes dependency installation, browser startup, jitter, and three group visits.
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,7 +32,8 @@ jobs:
 
       - name: Random delay inside the current time window
         run: |
-          delay_minutes=$((RANDOM % 21))
+          # Keep the initial wait short because sleep counts toward job timeout.
+          delay_minutes=$((RANDOM % 11))
           echo "Waiting ${delay_minutes} minutes before visiting a group"
           sleep "$((delay_minutes * 60))"
 
