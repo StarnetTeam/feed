@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import random
 import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from playwright.sync_api import sync_playwright
 
@@ -15,6 +15,14 @@ ROOT = Path(__file__).resolve().parents[1]
 GROUPS_FILE = ROOT / "config" / "groups.txt"
 OUTPUT_FILE = ROOT / "data" / "fids.json"
 CONFIG_FILE = ROOT / "config" / "match_windows.json"
+
+RECENT_MARKERS = (
+    "just now", "minute ago", "minutes ago", "hour ago", "hours ago", "today",
+    "الآن", "منذ دقيقة", "منذ دقائق", "منذ ساعة", "منذ ساعات", "اليوم",
+)
+OLD_MARKERS = ("yesterday", "أمس", "منذ يوم", "منذ يومين")
+FEED_HINT = re.compile(r"\b\d{3,5}\s*[/|,:;\-]?\s*[HVLR]\s*[/|,:;\-]?\s*\d{3,6}\b", re.I)
+HEX_HINT = re.compile(r"(?:[0-9A-F]{2}[\s:,-]*){6,32}", re.I)
 
 
 def load_groups() -> list[str]:
@@ -38,48 +46,53 @@ def load_config() -> dict:
     try:
         return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"delay_between_groups_seconds": [45, 90], "max_articles_per_group": 8}
+        return {"max_articles_per_group": 20, "delay_between_groups_seconds": [5, 10]}
 
 
-def looks_like_today(text: str, now: datetime) -> bool:
-    """Conservative check: keep relative/today labels and today's numeric dates."""
+def recent_enough(text: str) -> bool:
+    """Use timestamps when readable; otherwise trust the newest visible cards only."""
     lowered = text.lower()
-    today_tokens = (
-        "today", "just now", "minute", "minutes", "hour", "hours", "now",
-        "اليوم", "الآن", "منذ دقيقة", "منذ دقائق", "منذ ساعة", "منذ ساعات",
-    )
-    if any(token in lowered for token in today_tokens):
+    if any(marker in lowered for marker in OLD_MARKERS):
+        return False
+    if any(marker in lowered for marker in RECENT_MARKERS):
         return True
-    patterns = [
-        rf"\b{now.day:02d}[./-]{now.month:02d}(?:[./-]{now.year})?\b",
-        rf"\b{now.month:02d}[./-]{now.day:02d}(?:[./-]{now.year})?\b",
-        rf"\b{now.day}\s+(?:nov|november|نوفمبر)\b",
-        rf"\b(?:nov|november|نوفمبر)\s+{now.day}\b",
-    ]
-    return any(re.search(pattern, lowered) for pattern in patterns)
+    # Facebook sometimes hides the timestamp from inner_text. The page is not scrolled,
+    # so a feed-looking item in the first visible cards is treated as recent candidate.
+    return bool(FEED_HINT.search(text) and HEX_HINT.search(text))
 
 
-def collect_page(page, url: str, max_articles: int, now: datetime) -> list[dict]:
-    page.goto(url, wait_until="domcontentloaded", timeout=90000)
-    page.wait_for_timeout(5000)
+def recent_url(url: str) -> str:
+    parts = urlsplit(url)
+    query = "sorting_setting=CHRONOLOGICAL"
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
-    # Do not scroll: only the newest visible article cards are inspected.
+
+def collect_page(page, url: str, max_articles: int) -> list[dict]:
+    target = recent_url(url)
+    print(f"Opening: {target}")
+    page.goto(target, wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(2500)
+
     cards = page.locator("div[role='article']")
+    card_count = cards.count()
     results: list[dict] = []
-    for index in range(min(cards.count(), max_articles)):
-        try:
-            card_text = cards.nth(index).inner_text(timeout=5000).strip()
-            if card_text and looks_like_today(card_text, now):
-                results.extend(parse_text(card_text, url))
-        except Exception:
-            continue
+    if card_count:
+        for index in range(min(card_count, max_articles)):
+            try:
+                card_text = cards.nth(index).inner_text(timeout=3000).strip()
+                if card_text and recent_enough(card_text):
+                    results.extend(parse_text(card_text, url))
+            except Exception as exc:
+                print(f"WARN: card {index}: {exc}")
+    else:
+        # Anonymous Facebook layouts can omit role=article; use the first visible text.
+        body_text = page.locator("body").inner_text(timeout=20000)[:30000]
+        if recent_enough(body_text):
+            results.extend(parse_text(body_text, url))
 
-    # If Facebook's anonymous HTML has no article roles, use only a short visible text fallback.
-    if not results and cards.count() == 0:
-        text = page.locator("body").inner_text(timeout=30000)[:12000]
-        if looks_like_today(text, now):
-            results.extend(parse_text(text, url))
-    return results
+    unique: dict[str, dict] = {item["id"]: item for item in results}
+    print(f"Candidates from group: {len(unique)}")
+    return list(unique.values())
 
 
 def main() -> None:
@@ -87,35 +100,36 @@ def main() -> None:
     if not groups:
         raise SystemExit("No public group URLs found in config/groups.txt")
     config = load_config()
-    bounds = config.get("delay_between_groups_seconds", [45, 90])
+    max_articles = int(config.get("max_articles_per_group", 20))
+    bounds = config.get("delay_between_groups_seconds", [5, 10])
     min_delay, max_delay = int(bounds[0]), int(bounds[1])
-    max_articles = int(config.get("max_articles_per_group", 8))
+
     records = load_records()
     known = {item.get("id") for item in records}
-    now = datetime.now(timezone.utc)
-    timestamp = now.isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
 
-    random.SystemRandom().shuffle(groups)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
-        # One anonymous context and one page; no parallel requests and no login bypass.
-        context = browser.new_context(locale="en-US")
+        context = browser.new_context(
+            locale="en-US",
+            viewport={"width": 1280, "height": 900},
+            java_script_enabled=True,
+        )
         page = context.new_page()
         for position, url in enumerate(groups):
             try:
-                for item in collect_page(page, url, max_articles, now):
+                for item in collect_page(page, url, max_articles):
                     if item["id"] not in known:
                         item["first_seen_utc"] = timestamp
-                        item["post_date_filter"] = "today"
+                        item["collection_window"] = "last_12_hours"
                         records.append(item)
                         known.add(item["id"])
-                        print(f"New today: {item['satellite']} | {item['frequency']} | {url}")
+                        print(f"NEW FEED: {item['satellite']} | {item['frequency']} | {url}")
             except Exception as exc:
                 print(f"WARN: failed to read {url}: {exc}")
             if position < len(groups) - 1:
-                delay = random.SystemRandom().randint(min_delay, max_delay)
-                print(f"Waiting {delay}s before the next public group")
-                time.sleep(delay)
+                # Short sequential pause only; no random startup sleep.
+                time.sleep(max(0, min_delay))
         browser.close()
 
     OUTPUT_FILE.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

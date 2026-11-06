@@ -8,7 +8,7 @@
     "20:00",
     "22:00"
   ],
-  "random_delay_minutes": 20,
-  "delay_between_groups_seconds": [45, 90],
-  "max_articles_per_group": 8
+  "random_delay_minutes": 0,
+  "delay_between_groups_seconds": [5, 10],
+  "max_articles_per_group": 20
 }
